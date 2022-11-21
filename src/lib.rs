@@ -24,7 +24,7 @@ use {
 };
 
 pub struct Config {
-    pub host_base_url: Arc<OnceCell<String>>,
+    pub host_base_url: Arc<OnceCell<Url>>,
     pub whitelist: RegexSet,
 }
 
@@ -366,7 +366,7 @@ mod tests {
         let proxy_addr = proxy.local_addr();
 
         host_base_url
-            .set(format!("http://{proxy_addr}"))
+            .set(format!("http://{proxy_addr}").parse()?)
             .map_err(|e| anyhow!("{e}"))?;
 
         tokio::spawn(proxy);
