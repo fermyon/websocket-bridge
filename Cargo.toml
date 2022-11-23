@@ -22,6 +22,8 @@ futures = "0.3.25"
 clap = { version = "4.0.26", features = [ "derive" ] }
 axum-server = { version = "0.4.4", features = [ "tls-rustls" ] }
 pretty_env_logger = "0.4.0"
+serde = { version = "1.0.147", features = [ "derive" ] }
+http-body = "0.4.5"
 
 [dev-dependencies]
 async-trait = "0.1.58"

@@ -1,10 +1,11 @@
+#![deny(warnings)]
 use {
     anyhow::{Context, Result},
     axum::{
         body::Body,
         extract::{
             ws::{Message, WebSocket, WebSocketUpgrade},
-            BodyStream, Extension, Path,
+            BodyStream, Extension, Path, Query,
         },
         response::IntoResponse,
         routing, Error, Router, TypedHeader,
@@ -13,9 +14,11 @@ use {
     futures::{stream::SplitSink, SinkExt, Stream, StreamExt, TryStreamExt},
     headers::ContentType,
     http::{HeaderMap, StatusCode},
+    http_body::Empty,
     once_cell::sync::OnceCell,
     regex::RegexSet,
     reqwest::{Client, Response},
+    serde::Deserialize,
     std::sync::Arc,
     tokio::sync::Mutex as AsyncMutex,
     tower_http::trace::{DefaultMakeSpan, TraceLayer},
@@ -39,6 +42,15 @@ struct State {
     config: Config,
     sinks: DashMap<Uuid, AsyncMutex<Sink>>,
     client: Client,
+}
+
+#[derive(Deserialize)]
+struct ConnectQuery {
+    #[serde(rename = "f")]
+    on_frame: Option<String>,
+
+    #[serde(rename = "d")]
+    on_disconnect: Option<String>,
 }
 
 pub fn router(config: Config) -> Router<Body> {
@@ -108,7 +120,21 @@ async fn on_send(
                 StatusCode::NOT_FOUND,
                 format!("connection {id} has been closed"),
             )
-        })
+        })?;
+
+    Ok::<_, (StatusCode, String)>(
+        http::Response::builder()
+            .header("access-control-allow-origin", "*")
+            .body(Empty::new())
+            .unwrap(),
+    )
+}
+
+fn parse_error(name: &str) -> (StatusCode, String) {
+    (
+        StatusCode::BAD_REQUEST,
+        format!(r#"unable to parse "{name}" header as a URL"#),
+    )
 }
 
 fn get_header_url(headers: &HeaderMap, name: &str) -> Result<Url, (StatusCode, String)> {
@@ -119,26 +145,27 @@ fn get_header_url(headers: &HeaderMap, name: &str) -> Result<Url, (StatusCode, S
         )
     };
 
-    let parse_error = || {
-        (
-            StatusCode::BAD_REQUEST,
-            format!(r#"unable to parse "{name}" header as a URL"#),
-        )
-    };
-
     Url::parse(
         headers
             .get(name)
             .ok_or_else(missing_error)?
             .to_str()
-            .map_err(|_| parse_error())?,
+            .map_err(|_| parse_error(name))?,
     )
-    .map_err(|_| parse_error())
+    .map_err(|_| parse_error(name))
 }
 
-fn get_urls(whitelist: &RegexSet, headers: &HeaderMap) -> Result<Urls, (StatusCode, String)> {
-    let get_header_url = |name| {
-        let url = get_header_url(headers, name)?;
+fn get_urls(
+    whitelist: &RegexSet,
+    query: &ConnectQuery,
+    headers: &HeaderMap,
+) -> Result<Urls, (StatusCode, String)> {
+    let get_header_url = |param, name| {
+        let url = if let Some(param) = param {
+            Url::parse(param).map_err(|_| parse_error(name))
+        } else {
+            get_header_url(headers, name)
+        }?;
 
         if whitelist.is_match(url.as_ref()) {
             Ok(url)
@@ -151,17 +178,18 @@ fn get_urls(whitelist: &RegexSet, headers: &HeaderMap) -> Result<Urls, (StatusCo
     };
 
     Ok(Urls {
-        on_frame: get_header_url("x-ws-proxy-on-frame")?,
-        on_disconnect: get_header_url("x-ws-proxy-on-disconnect")?,
+        on_frame: get_header_url(query.on_frame.as_deref(), "x-ws-proxy-on-frame")?,
+        on_disconnect: get_header_url(query.on_disconnect.as_deref(), "x-ws-proxy-on-disconnect")?,
     })
 }
 
 async fn on_connect(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
+    Query(query): Query<ConnectQuery>,
     Extension(state): Extension<Arc<State>>,
 ) -> impl IntoResponse {
-    match get_urls(&state.config.whitelist, &headers) {
+    match get_urls(&state.config.whitelist, &query, &headers) {
         Ok(urls) => ws.on_upgrade(move |ws| async move { serve(&state, &urls, ws).await }),
         Err(rejection) => rejection.into_response(),
     }
@@ -174,7 +202,7 @@ async fn serve(state: &State, urls: &Urls, ws: WebSocket) {
 
     state.sinks.insert(id, AsyncMutex::new(tx));
 
-    let send_url = format!("{}/send/{id}", state.config.host_base_url.get().unwrap());
+    let send_url = format!("{}send/{id}", state.config.host_base_url.get().unwrap());
 
     if let Err(e) = receive(state, &urls.on_frame, rx, &send_url).await {
         tracing::warn!("error serving connection {id}: {e:?}");
@@ -266,7 +294,7 @@ mod tests {
         },
         futures::channel::mpsc::{self, Sender},
         std::net::{Ipv4Addr, SocketAddr},
-        tungstenite::{handshake::client, protocol::Message as TMessage},
+        tungstenite::protocol::Message as TMessage,
     };
 
     #[derive(Debug)]
@@ -372,23 +400,7 @@ mod tests {
         tokio::spawn(proxy);
 
         let (mut socket, _response) = tokio_tungstenite::connect_async(
-            client::Request::builder()
-                .method("GET")
-                .header("host", proxy_addr.ip().to_string())
-                .header("connection", "Upgrade")
-                .header("upgrade", "websocket")
-                .header("sec-websocket-version", "13")
-                .header("sec-websocket-key", client::generate_key())
-                .header(
-                    "x-ws-proxy-on-frame",
-                    format!("http://{backend_addr}/frame"),
-                )
-                .header(
-                    "x-ws-proxy-on-disconnect",
-                    format!("http://{backend_addr}/disconnect"),
-                )
-                .uri(&format!("ws://{proxy_addr}/connect"))
-                .body(())?,
+            format!("ws://{proxy_addr}/connect?f=http://{backend_addr}/frame&d=http://{backend_addr}/disconnect")
         )
         .await?;
 
@@ -404,6 +416,7 @@ mod tests {
             } => {
                 assert_eq!(content_type, ContentType::text_utf8());
                 assert_eq!(&body, b"hello");
+                eprintln!("send url: {send_url}");
                 assert!(send_url
                     .to_string()
                     .starts_with(&format!("http://{proxy_addr}/send")));
