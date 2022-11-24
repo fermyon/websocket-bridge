@@ -28,7 +28,7 @@ use {
 
 pub struct Config {
     pub host_base_url: Arc<OnceCell<Url>>,
-    pub whitelist: RegexSet,
+    pub allowlist: RegexSet,
 }
 
 struct Urls {
@@ -156,7 +156,7 @@ fn get_header_url(headers: &HeaderMap, name: &str) -> Result<Url, (StatusCode, S
 }
 
 fn get_urls(
-    whitelist: &RegexSet,
+    allowlist: &RegexSet,
     query: &ConnectQuery,
     headers: &HeaderMap,
 ) -> Result<Urls, (StatusCode, String)> {
@@ -167,7 +167,7 @@ fn get_urls(
             get_header_url(headers, name)
         }?;
 
-        if whitelist.is_match(url.as_ref()) {
+        if allowlist.is_match(url.as_ref()) {
             Ok(url)
         } else {
             Err((
@@ -189,7 +189,7 @@ async fn on_connect(
     Query(query): Query<ConnectQuery>,
     Extension(state): Extension<Arc<State>>,
 ) -> impl IntoResponse {
-    match get_urls(&state.config.whitelist, &query, &headers) {
+    match get_urls(&state.config.allowlist, &query, &headers) {
         Ok(urls) => ws.on_upgrade(move |ws| async move { serve(&state, &urls, ws).await }),
         Err(rejection) => rejection.into_response(),
     }
@@ -383,7 +383,7 @@ mod tests {
         let proxy = Server::try_bind(&bind_address)?.serve(
             router(Config {
                 host_base_url: host_base_url.clone(),
-                whitelist: RegexSet::new([&format!(
+                allowlist: RegexSet::new([&format!(
                     "http://{}/.*",
                     backend_addr.to_string().replace('.', "\\.")
                 )])?,

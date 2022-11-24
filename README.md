@@ -23,11 +23,11 @@ should match the publicly-visible hostname for your server, and will be used to
 construct "callback" URLs.  The `--cert` and `--key` arguments are optional if
 you'd like to use TLS.
 
-The `--whitelist` option(s) (which may be specified multiple times) control
-which backend HTTP servers may be proxied to.  Note that the `--whitelist`
+The `--allowlist` option(s) (which may be specified multiple times) control
+which backend HTTP servers may be proxied to.  Note that the `--allowlist`
 option takes a regular expression, so be sure to escape any dots in the name
 (e.g. `foo.example.com` -> `foo\.example\.com`).  If you don't specify a
-whitelist, the server will reject all incoming traffic.
+allowlist, the server will reject all incoming traffic.
 
 ```
 cargo run -- \
@@ -35,7 +35,7 @@ cargo run -- \
     --base-url https://$YOUR_WEBSOCKET_BRIDGE_SERVER:9443 \
     --cert $PATH_TO_YOUR_WEBSOCKET_BRIDGE_TLS_CERT \
     --key $PATH_TO_YOUR_WEBSOCKET_BRIDGE_TLS_CERT \
-    --whitelist 'https://$YOUR_BACKEND_SERVER_WITH_DOTS_ESCAPED/.*'
+    --allowlist 'https://$YOUR_BACKEND_SERVER_WITH_DOTS_ESCAPED/.*'
 ```
 
 Then, assuming your backend server is up and accepting POST requests for
