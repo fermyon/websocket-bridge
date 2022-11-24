@@ -26,7 +26,7 @@ you'd like to use TLS.
 The `--whitelist` option(s) (which may be specified multiple times) control
 which backend HTTP servers may be proxied to.  Note that the `--whitelist`
 option takes a regular expression, so be sure to escape any dots in the name
-(e.g. "foo.example.com" -> "foo\.example\.com").  If you don't specify a
+(e.g. `foo.example.com` -> `foo\.example\.com`).  If you don't specify a
 whitelist, the server will reject all incoming traffic.
 
 ```
