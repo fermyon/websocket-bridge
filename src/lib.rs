@@ -416,7 +416,6 @@ mod tests {
             } => {
                 assert_eq!(content_type, ContentType::text_utf8());
                 assert_eq!(&body, b"hello");
-                eprintln!("send url: {send_url}");
                 assert!(send_url
                     .to_string()
                     .starts_with(&format!("http://{proxy_addr}/send")));
