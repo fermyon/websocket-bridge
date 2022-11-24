@@ -20,9 +20,9 @@ struct Options {
     #[arg(long)]
     base_url: Url,
 
-    /// Whitelist of allowed backend server URLs
+    /// allowlist of allowed backend server URLs
     #[arg(long)]
-    whitelist: Vec<String>,
+    allowlist: Vec<String>,
 
     /// TLS certificate to use
     #[arg(long, requires = "key")]
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
 
     let app = websocket_bridge::router(Config {
         host_base_url: Arc::new(OnceCell::from(options.base_url)),
-        whitelist: RegexSet::new(options.whitelist)?,
+        allowlist: RegexSet::new(options.allowlist)?,
     })
     .into_make_service();
 
