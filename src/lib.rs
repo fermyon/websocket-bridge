@@ -2,10 +2,9 @@
 use {
     anyhow::{Context, Result},
     axum::{
-        body::Body,
         extract::{
             ws::{Message, WebSocket, WebSocketUpgrade},
-            BodyStream, Extension, Path, Query,
+            BodyStream, Path, Query, State,
         },
         response::IntoResponse,
         routing, Error, Router, TypedHeader,
@@ -38,7 +37,7 @@ struct Urls {
 
 type Sink = SplitSink<WebSocket, Message>;
 
-struct State {
+struct MyState {
     config: Config,
     sinks: DashMap<Uuid, AsyncMutex<Sink>>,
     client: Client,
@@ -53,19 +52,19 @@ struct ConnectQuery {
     on_disconnect: Option<String>,
 }
 
-pub fn router(config: Config) -> Router<Body> {
+pub fn router(config: Config) -> Router {
     Router::new()
         .route("/connect", routing::get(on_connect))
         .route("/send/:id", routing::post(on_send))
-        .layer(Extension(Arc::new(State {
-            config,
-            sinks: DashMap::new(),
-            client: Client::new(),
-        })))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::default().include_headers(true)),
         )
+        .with_state(Arc::new(MyState {
+            config,
+            sinks: DashMap::new(),
+            client: Client::new(),
+        }))
 }
 
 async fn concat(mut stream: BodyStream) -> Result<Vec<u8>, Error> {
@@ -78,9 +77,9 @@ async fn concat(mut stream: BodyStream) -> Result<Vec<u8>, Error> {
 
 async fn on_send(
     Path(id): Path<Uuid>,
-    body: BodyStream,
     TypedHeader(content_type): TypedHeader<ContentType>,
-    Extension(state): Extension<Arc<State>>,
+    State(state): State<Arc<MyState>>,
+    body: BodyStream,
 ) -> impl IntoResponse {
     let body_error = |_| {
         (
@@ -187,7 +186,7 @@ async fn on_connect(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
     Query(query): Query<ConnectQuery>,
-    Extension(state): Extension<Arc<State>>,
+    State(state): State<Arc<MyState>>,
 ) -> impl IntoResponse {
     match get_urls(&state.config.allowlist, &query, &headers) {
         Ok(urls) => ws.on_upgrade(move |ws| async move { serve(&state, &urls, ws).await }),
@@ -195,7 +194,7 @@ async fn on_connect(
     }
 }
 
-async fn serve(state: &State, urls: &Urls, ws: WebSocket) {
+async fn serve(state: &MyState, urls: &Urls, ws: WebSocket) {
     let id = Uuid::new_v4();
 
     let (tx, rx) = ws.split();
@@ -237,7 +236,7 @@ async fn serve(state: &State, urls: &Urls, ws: WebSocket) {
 }
 
 async fn receive(
-    state: &State,
+    state: &MyState,
     on_frame: &Url,
     mut rx: impl Stream<Item = Result<Message, Error>> + Unpin,
     send_url: &str,
@@ -288,11 +287,9 @@ mod tests {
         super::*,
         anyhow::{anyhow, bail},
         async_trait::async_trait,
-        axum::{
-            extract::{FromRequest, RequestParts},
-            Server,
-        },
+        axum::{extract::FromRequestParts, Server},
         futures::channel::mpsc::{self, Sender},
+        http::request::Parts,
         std::net::{Ipv4Addr, SocketAddr},
         tungstenite::protocol::Message as TMessage,
     };
@@ -312,30 +309,33 @@ mod tests {
     struct SendUrl(Url);
 
     #[async_trait]
-    impl<B: Send> FromRequest<B> for SendUrl {
+    impl<S: Sync> FromRequestParts<S> for SendUrl {
         type Rejection = (StatusCode, String);
 
-        async fn from_request(request: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
-            get_header_url(request.headers(), "x-ws-proxy-send").map(Self)
+        async fn from_request_parts(
+            request: &mut Parts,
+            _state: &S,
+        ) -> Result<Self, Self::Rejection> {
+            get_header_url(&request.headers, "x-ws-proxy-send").map(Self)
         }
     }
 
-    fn backend_router(sender: Arc<AsyncMutex<Sender<Item>>>) -> Router<Body> {
+    fn backend_router(sender: Arc<AsyncMutex<Sender<Item>>>) -> Router {
         Router::new()
             .route("/frame", routing::post(on_frame))
             .route("/disconnect", routing::post(on_disconnect))
-            .layer(Extension(sender))
             .layer(
                 TraceLayer::new_for_http()
                     .make_span_with(DefaultMakeSpan::default().include_headers(true)),
             )
+            .with_state(sender)
     }
 
     async fn on_frame(
-        body: BodyStream,
         TypedHeader(content_type): TypedHeader<ContentType>,
         SendUrl(send_url): SendUrl,
-        Extension(sender): Extension<Arc<AsyncMutex<Sender<Item>>>>,
+        State(sender): State<Arc<AsyncMutex<Sender<Item>>>>,
+        body: BodyStream,
     ) -> impl IntoResponse {
         let error = || StatusCode::INTERNAL_SERVER_ERROR;
 
@@ -353,7 +353,7 @@ mod tests {
 
     async fn on_disconnect(
         SendUrl(send_url): SendUrl,
-        Extension(sender): Extension<Arc<AsyncMutex<Sender<Item>>>>,
+        State(sender): State<Arc<AsyncMutex<Sender<Item>>>>,
     ) -> impl IntoResponse {
         sender
             .lock()
