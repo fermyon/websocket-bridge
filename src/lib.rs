@@ -212,8 +212,7 @@ async fn serve(state: &MyState, urls: &Urls, ws: WebSocket) {
         .remove(&id)
         .unwrap()
         .1
-        .lock()
-        .await
+        .into_inner()
         .close()
         .await
     {
