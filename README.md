@@ -26,8 +26,10 @@ you'd like to use TLS.
 The `--allowlist` option(s) (which may be specified multiple times) control
 which backend HTTP servers may be proxied to.  Note that the `--allowlist`
 option takes a regular expression, so be sure to escape any dots in the name
-(e.g. `foo.example.com` -> `foo\.example\.com`).  If you don't specify a
-allowlist, the server will reject all incoming traffic.
+(e.g. `foo.example.com` -> `foo\.example\.com`).  Also, you may need to use
+double slashes (e.g. `foo\\.example\\.com) or single quotes (e.g.
+`'foo\.example\.com'`) if your shell interprets slashes itself.  If you don't
+specify an allow list, the server will reject all incoming traffic.
 
 ```
 cargo run -- \
