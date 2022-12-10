@@ -12,15 +12,17 @@ use {
     dashmap::DashMap,
     futures::{stream::SplitSink, SinkExt, Stream, StreamExt, TryStreamExt},
     headers::ContentType,
-    http::{HeaderMap, StatusCode},
-    http_body::Empty,
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     once_cell::sync::OnceCell,
     regex::RegexSet,
     reqwest::{Client, Response},
     serde::Deserialize,
     std::sync::Arc,
     tokio::sync::Mutex as AsyncMutex,
-    tower_http::trace::{DefaultMakeSpan, TraceLayer},
+    tower_http::{
+        cors::CorsLayer,
+        trace::{DefaultMakeSpan, TraceLayer},
+    },
     url::Url,
     uuid::Uuid,
 };
@@ -59,6 +61,11 @@ pub fn router(config: Config) -> Router {
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::default().include_headers(true)),
+        )
+        .layer(
+            CorsLayer::new()
+                .allow_origin("*".parse::<HeaderValue>().unwrap())
+                .allow_methods([Method::GET, Method::POST]),
         )
         .with_state(Arc::new(MyState {
             config,
@@ -121,12 +128,7 @@ async fn on_send(
             )
         })?;
 
-    Ok::<_, (StatusCode, String)>(
-        http::Response::builder()
-            .header("access-control-allow-origin", "*")
-            .body(Empty::new())
-            .unwrap(),
-    )
+    Ok::<_, (StatusCode, String)>(StatusCode::OK)
 }
 
 fn parse_error(name: &str) -> (StatusCode, String) {
