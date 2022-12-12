@@ -51,7 +51,7 @@ websocat wss://$YOUR_WEBSOCKET_BRIDGE_SERVER:9443/connect?f=https://$YOUR_BACKEN
 Any frames you send will be posted to `https://$YOUR_BACKEND_SERVER/frame`, and
 `websocket-bridge` will send a final POST to
 `https://$YOUR_BACKEND_SERVER/disconnect` when the WebSocket connection is
-closed.  In both cases, the POST requests will contain a `x-ws-proxy-send`
+closed.  In both cases, the POST requests will contain a `ws-bridge-send`
 header that specifies the "callback" URL -- e.g.
 `https://$YOUR_WEBSOCKET_BRIDGE_SERVER:9443/[some random UUID]`, where `[some
 random UUID]` is a UUID which uniquely identifies the connection.

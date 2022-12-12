@@ -179,8 +179,8 @@ fn get_urls(
     };
 
     Ok(Urls {
-        on_frame: get_header_url(query.on_frame.as_deref(), "x-ws-proxy-on-frame")?,
-        on_disconnect: get_header_url(query.on_disconnect.as_deref(), "x-ws-proxy-on-disconnect")?,
+        on_frame: get_header_url(query.on_frame.as_deref(), "ws-bridge-on-frame")?,
+        on_disconnect: get_header_url(query.on_disconnect.as_deref(), "ws-bridge-on-disconnect")?,
     })
 }
 
@@ -224,7 +224,7 @@ async fn serve(state: &MyState, urls: &Urls, ws: WebSocket) {
     if let Err(e) = state
         .client
         .post(urls.on_disconnect.clone())
-        .header("x-ws-proxy-send", send_url)
+        .header("ws-bridge-send", send_url)
         .send()
         .await
         .and_then(Response::error_for_status)
@@ -246,7 +246,7 @@ async fn receive(
         state
             .client
             .post(on_frame.clone())
-            .header("x-ws-proxy-send", send_url)
+            .header("ws-bridge-send", send_url)
     };
 
     let context = || format!("posting to {on_frame}");
@@ -317,7 +317,7 @@ mod tests {
             request: &mut Parts,
             _state: &S,
         ) -> Result<Self, Self::Rejection> {
-            get_header_url(&request.headers, "x-ws-proxy-send").map(Self)
+            get_header_url(&request.headers, "ws-bridge-send").map(Self)
         }
     }
 
