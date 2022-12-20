@@ -445,11 +445,8 @@ mod tests {
         drop(socket);
 
         match rx.next().await.context("unexpected end of stream")? {
-            Item::OnDisconnect { send_url } => {
-                assert_eq!(my_send_url, send_url);
-            }
-
-            other => bail!("expected an `OnFrame` but got {other:?}"),
+            Item::OnDisconnect { send_url } => assert_eq!(my_send_url, send_url),
+            other => bail!("expected an `OnDisconnect` but got {other:?}"),
         }
 
         Ok(())
