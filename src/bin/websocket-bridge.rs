@@ -20,9 +20,19 @@ struct Options {
     #[arg(long)]
     base_url: Url,
 
-    /// allowlist of allowed backend server URLs
+    /// List of allowed backend server URL regular expressions
+    ///
+    /// Example: 'https://.*\.foo\.example\.com/.*'
     #[arg(long)]
     allowlist: Vec<String>,
+
+    /// Like `allowlist`, but just the host suffixes as plain strings (not regular expressions)
+    ///
+    /// This list will be combined with `allowlist`, if present.
+    ///
+    /// Example: '.foo.example.com'
+    #[arg(long)]
+    host_suffix_allowlist: Vec<String>,
 
     /// TLS certificate to use
     #[arg(long, requires = "key")]
@@ -39,9 +49,20 @@ async fn main() -> Result<()> {
 
     let options = Options::parse();
 
+    let allowlist = options
+        .allowlist
+        .into_iter()
+        .chain(
+            options
+                .host_suffix_allowlist
+                .iter()
+                .map(|s| format!("https://.*{}/.*", regex::escape(s))),
+        )
+        .collect::<Vec<_>>();
+
     let app = websocket_bridge::router(Config {
         host_base_url: Arc::new(OnceCell::from(options.base_url)),
-        allowlist: RegexSet::new(options.allowlist)?,
+        allowlist: RegexSet::new(allowlist)?,
     })
     .into_make_service();
 

@@ -10,7 +10,7 @@ use {
         routing, Error, Router, TypedHeader,
     },
     dashmap::DashMap,
-    futures::{stream::SplitSink, SinkExt, Stream, StreamExt, TryStreamExt},
+    futures::{future, stream::SplitSink, SinkExt, Stream, StreamExt, TryStreamExt},
     headers::ContentType,
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     once_cell::sync::OnceCell,
@@ -58,6 +58,7 @@ pub fn router(config: Config) -> Router {
     Router::new()
         .route("/connect", routing::get(on_connect))
         .route("/send/:id", routing::post(on_send))
+        .route("/healthz", routing::get(|| future::ready(StatusCode::OK)))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::default().include_headers(true)),
@@ -386,7 +387,7 @@ mod tests {
                 host_base_url: host_base_url.clone(),
                 allowlist: RegexSet::new([&format!(
                     "http://{}/.*",
-                    backend_addr.to_string().replace('.', "\\.")
+                    regex::escape(&backend_addr.to_string())
                 )])?,
             })
             .into_make_service(),
