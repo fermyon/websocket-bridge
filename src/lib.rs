@@ -12,10 +12,10 @@ use {
     dashmap::DashMap,
     futures::{future, stream::SplitSink, SinkExt, Stream, StreamExt, TryStreamExt},
     headers::ContentType,
-    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    http::{header::HeaderName, HeaderMap, HeaderValue, Method, StatusCode},
     once_cell::sync::OnceCell,
     regex::RegexSet,
-    reqwest::{Client, Response},
+    reqwest::{Client, RequestBuilder, Response},
     serde::Deserialize,
     std::sync::Arc,
     tokio::sync::Mutex as AsyncMutex,
@@ -30,6 +30,7 @@ use {
 pub struct Config {
     pub host_base_url: Arc<OnceCell<Url>>,
     pub allowlist: RegexSet,
+    pub group_by_host: bool,
 }
 
 struct Urls {
@@ -37,11 +38,14 @@ struct Urls {
     on_disconnect: Url,
 }
 
-type Sink = SplitSink<WebSocket, Message>;
+struct Sink {
+    tx: AsyncMutex<SplitSink<WebSocket, Message>>,
+    group: Option<String>,
+}
 
 struct MyState {
     config: Config,
-    sinks: DashMap<Uuid, AsyncMutex<Sink>>,
+    sinks: DashMap<Uuid, Sink>,
     client: Client,
 }
 
@@ -86,6 +90,7 @@ async fn concat(mut stream: BodyStream) -> Result<Vec<u8>, Error> {
 async fn on_send(
     Path(id): Path<Uuid>,
     TypedHeader(content_type): TypedHeader<ContentType>,
+    headers: HeaderMap,
     State(state): State<Arc<MyState>>,
     body: BodyStream,
 ) -> impl IntoResponse {
@@ -96,15 +101,23 @@ async fn on_send(
         )
     };
 
-    state
-        .sinks
-        .get(&id)
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("unknown connection id: {id}"),
-            )
-        })?
+    let sink = state.sinks.get(&id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("unknown connection id: {id}"),
+        )
+    })?;
+
+    if let Some(group) = sink.group.as_deref() {
+        if group != get_header(&headers, "ws-bridge-group")? {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                r#"incorrect "ws-bridge-group" header"#.to_owned(),
+            ));
+        }
+    }
+
+    sink.tx
         .lock()
         .await
         .send(if content_type == ContentType::text_utf8() {
@@ -132,6 +145,32 @@ async fn on_send(
     Ok::<_, (StatusCode, String)>(StatusCode::OK)
 }
 
+fn get_optional_header<'a>(
+    headers: &'a HeaderMap,
+    name: &str,
+) -> Result<Option<&'a str>, (StatusCode, String)> {
+    headers
+        .get(name)
+        .map(|v| {
+            v.to_str().map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!(r#"unable to parse "{name}" header as UTF-8"#),
+                )
+            })
+        })
+        .transpose()
+}
+
+fn get_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, (StatusCode, String)> {
+    get_optional_header(headers, name)?.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!(r#"missing required header: "{name}""#),
+        )
+    })
+}
+
 fn parse_error(name: &str) -> (StatusCode, String) {
     (
         StatusCode::BAD_REQUEST,
@@ -140,21 +179,7 @@ fn parse_error(name: &str) -> (StatusCode, String) {
 }
 
 fn get_header_url(headers: &HeaderMap, name: &str) -> Result<Url, (StatusCode, String)> {
-    let missing_error = || {
-        (
-            StatusCode::BAD_REQUEST,
-            format!(r#"missing required header: "{name}""#),
-        )
-    };
-
-    Url::parse(
-        headers
-            .get(name)
-            .ok_or_else(missing_error)?
-            .to_str()
-            .map_err(|_| parse_error(name))?,
-    )
-    .map_err(|_| parse_error(name))
+    Url::parse(get_header(headers, name)?).map_err(|_| parse_error(name))
 }
 
 fn get_urls(
@@ -202,11 +227,23 @@ async fn serve(state: &MyState, urls: &Urls, ws: WebSocket) {
 
     let (tx, rx) = ws.split();
 
-    state.sinks.insert(id, AsyncMutex::new(tx));
+    let group = if state.config.group_by_host {
+        urls.on_frame.host_str()
+    } else {
+        None
+    };
+
+    state.sinks.insert(
+        id,
+        Sink {
+            tx: AsyncMutex::new(tx),
+            group: group.map(str::to_owned),
+        },
+    );
 
     let send_url = format!("{}send/{id}", state.config.host_base_url.get().unwrap());
 
-    if let Err(e) = receive(state, &urls.on_frame, rx, &send_url).await {
+    if let Err(e) = receive(state, &urls.on_frame, rx, &send_url, group).await {
         tracing::warn!("error serving connection {id}: {e:?}");
     }
 
@@ -215,6 +252,7 @@ async fn serve(state: &MyState, urls: &Urls, ws: WebSocket) {
         .remove(&id)
         .unwrap()
         .1
+        .tx
         .into_inner()
         .close()
         .await
@@ -226,6 +264,7 @@ async fn serve(state: &MyState, urls: &Urls, ws: WebSocket) {
         .client
         .post(urls.on_disconnect.clone())
         .header("ws-bridge-send", send_url)
+        .maybe_header("ws-bridge-group", group)
         .send()
         .await
         .and_then(Response::error_for_status)
@@ -242,12 +281,14 @@ async fn receive(
     on_frame: &Url,
     mut rx: impl Stream<Item = Result<Message, Error>> + Unpin,
     send_url: &str,
+    group: Option<&str>,
 ) -> Result<()> {
     let post = || {
         state
             .client
             .post(on_frame.clone())
             .header("ws-bridge-send", send_url)
+            .maybe_header("ws-bridge-group", group)
     };
 
     let context = || format!("posting to {on_frame}");
@@ -283,6 +324,31 @@ async fn receive(
     Ok(())
 }
 
+trait MaybeHeader {
+    fn maybe_header<K, V>(self, key: K, value: Option<V>) -> Self
+    where
+        HeaderName: TryFrom<K>,
+        <HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+        HeaderValue: TryFrom<V>,
+        <HeaderValue as TryFrom<V>>::Error: Into<http::Error>;
+}
+
+impl MaybeHeader for RequestBuilder {
+    fn maybe_header<K, V>(self, key: K, value: Option<V>) -> Self
+    where
+        HeaderName: TryFrom<K>,
+        <HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+        HeaderValue: TryFrom<V>,
+        <HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
+    {
+        if let Some(value) = value {
+            self.header(key, value)
+        } else {
+            self
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
@@ -301,24 +367,31 @@ mod tests {
         OnFrame {
             body: Vec<u8>,
             content_type: ContentType,
-            send_url: Url,
+            send_info: SendInfo,
         },
         OnDisconnect {
-            send_url: Url,
+            send_info: SendInfo,
         },
     }
 
-    struct SendUrl(Url);
+    #[derive(Debug, PartialEq)]
+    struct SendInfo {
+        url: Url,
+        group: Option<String>,
+    }
 
     #[async_trait]
-    impl<S: Sync> FromRequestParts<S> for SendUrl {
+    impl<S: Sync> FromRequestParts<S> for SendInfo {
         type Rejection = (StatusCode, String);
 
         async fn from_request_parts(
             request: &mut Parts,
             _state: &S,
         ) -> Result<Self, Self::Rejection> {
-            get_header_url(&request.headers, "ws-bridge-send").map(Self)
+            Ok(Self {
+                url: get_header_url(&request.headers, "ws-bridge-send")?,
+                group: get_optional_header(&request.headers, "ws-bridge-group")?.map(str::to_owned),
+            })
         }
     }
 
@@ -335,7 +408,7 @@ mod tests {
 
     async fn on_frame(
         TypedHeader(content_type): TypedHeader<ContentType>,
-        SendUrl(send_url): SendUrl,
+        send_info: SendInfo,
         State(sender): State<Arc<AsyncMutex<Sender<Item>>>>,
         body: BodyStream,
     ) -> impl IntoResponse {
@@ -347,20 +420,20 @@ mod tests {
             .send(Item::OnFrame {
                 body: concat(body).await.map_err(|_| error())?,
                 content_type,
-                send_url,
+                send_info,
             })
             .await
             .map_err(|_| error())
     }
 
     async fn on_disconnect(
-        SendUrl(send_url): SendUrl,
+        send_info: SendInfo,
         State(sender): State<Arc<AsyncMutex<Sender<Item>>>>,
     ) -> impl IntoResponse {
         sender
             .lock()
             .await
-            .send(Item::OnDisconnect { send_url })
+            .send(Item::OnDisconnect { send_info })
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
     }
@@ -389,6 +462,7 @@ mod tests {
                     "http://{}/.*",
                     regex::escape(&backend_addr.to_string())
                 )])?,
+                group_by_host: true,
             })
             .into_make_service(),
         );
@@ -408,29 +482,32 @@ mod tests {
 
         socket.send(TMessage::text("hello")).await.unwrap();
 
-        let my_send_url;
+        let my_send_info;
 
         match rx.next().await.context("unexpected end of stream")? {
             Item::OnFrame {
                 body,
                 content_type,
-                send_url,
+                send_info,
             } => {
                 assert_eq!(content_type, ContentType::text_utf8());
                 assert_eq!(&body, b"hello");
-                assert!(send_url
+                assert!(send_info
+                    .url
                     .to_string()
                     .starts_with(&format!("http://{proxy_addr}/send")));
+                assert_eq!(send_info.group, Some(proxy_addr.ip().to_string()));
 
                 Client::new()
-                    .post(send_url.clone())
+                    .post(send_info.url.clone())
                     .header("content-type", "text/plain;charset=UTF-8")
+                    .maybe_header("ws-bridge-group", send_info.group.as_deref())
                     .body("hola")
                     .send()
                     .await?
                     .error_for_status()?;
 
-                my_send_url = send_url;
+                my_send_info = send_info;
             }
 
             other => bail!("expected an `OnFrame` but got {other:?}"),
@@ -446,7 +523,7 @@ mod tests {
         drop(socket);
 
         match rx.next().await.context("unexpected end of stream")? {
-            Item::OnDisconnect { send_url } => assert_eq!(my_send_url, send_url),
+            Item::OnDisconnect { send_info } => assert_eq!(my_send_info, send_info),
             other => bail!("expected an `OnDisconnect` but got {other:?}"),
         }
 

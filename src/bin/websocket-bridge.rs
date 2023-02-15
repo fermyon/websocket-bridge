@@ -41,6 +41,13 @@ struct Options {
     /// TLS key to use
     #[arg(long, requires = "cert")]
     key: Option<PathBuf>,
+
+    /// If specified, send the backend hostname as a `ws-bridge-group` header along with the `ws-bridge-send`
+    /// header and require that all /send/* requests echo it back.
+    ///
+    /// This is useful for grouping and rate limiting requests by hostname in a load-balancing proxy.
+    #[arg(long)]
+    group_by_host: bool,
 }
 
 #[tokio::main]
@@ -63,6 +70,7 @@ async fn main() -> Result<()> {
     let app = websocket_bridge::router(Config {
         host_base_url: Arc::new(OnceCell::from(options.base_url)),
         allowlist: RegexSet::new(allowlist)?,
+        group_by_host: options.group_by_host,
     })
     .into_make_service();
 
