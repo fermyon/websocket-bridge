@@ -2063,7 +2063,7 @@ dependencies = [
  "tokio-tungstenite 0.17.2",
  "tower-http",
  "tracing",
- "tungstenite 0.17.3",
+ "tungstenite 0.20.1",
  "url",
  "uuid",
 ]
